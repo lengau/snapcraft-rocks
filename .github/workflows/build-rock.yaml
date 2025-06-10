@@ -7,14 +7,17 @@ on:
   push:
     branches:
       - 'core2[24]-[78]'
+      - work/SNAPCRAFT-1156
 
 jobs:
   build-rock:
     strategy:
       matrix:
-        runner: [self-hosted]
-        arch: [amd64, arm64]
-    runs-on: ["${{ matrix.runner }}", "${{ matrix.arch }}"]
+        platform: [ubuntu-24.04, ubuntu-24.04-arm]
+        # runner: [self-hosted]
+        # arch: [amd64, arm64]
+    # runs-on: ["${{ matrix.runner }}", "${{ matrix.arch }}"]
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,7 +42,7 @@ jobs:
           path: '*.rock'
 
   spread-tests:
-    runs-on: self-hosted
+    runs-on: [self-hosted, spread-installed]
     needs: [build-rock]
 
     steps:
@@ -64,7 +67,8 @@ jobs:
         run: spread
 
   publish-rock:
-    runs-on: [self-hosted]
+    #runs-on: [self-hosted]
+    runs-on: ubuntu-24.04
     needs: [build-rock]
     # Not on pull requests; only when they're merged
     if: github.event_name == 'push'
@@ -83,10 +87,26 @@ jobs:
           array_ref=(${GITHUB_REF_NAME//-/ })
           snapcraft_core=${array_ref[0]}
           snapcraft_version=${array_ref[1]}
+          tag="${snapcraft_version}_${snapcraft_core}"
+          target_image="ghcr.io/${{github.repository_owner}}/snapcraft"
 
-          source_rock="oci-archive:$(ls snapcraft*.rock)"
-          target_image="ghcr.io/canonical/snapcraft:${snapcraft_version}_${snapcraft_core}"
-          dest_image="docker://${target_image}"
+          multi_arch_image_name="${target_image}:${tag}"
 
-          rockcraft.skopeo --insecure-policy copy ${source_rock} ${dest_image} --dest-creds "${{ github.repository_owner }}:${{ secrets.GITHUB_TOKEN }}"
+          declare -a digests=()
+          for rock in *.rock; do
+            digest=$(skopeo inspect oci-archive:snapcraft-core24_8.9.2_arm64.rock --format "{{ .Digest }}"))
+            digests+=($digest)
+            source_rock="oci-archive:${rock}"
+            dest_image="docker://${target_image}@${digest}"
+
+            rockcraft.skopeo --insecure-policy copy ${source_rock} ${dest_image} --dest-creds "${{ github.repository_owner }}:${{ secrets.GITHUB_TOKEN }}"
+          done
+
+          args=("manifest" "push")
+          for digest in "${digests[@]}"; do
+            args+=(--amend "${digest}")
+          done
+
+          docker "${args[@]}"
+
           echo "Image is available at ${target_image}"
